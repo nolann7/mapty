@@ -66,16 +66,28 @@ class App {
   #mapZoomLevel = 13;
   #mapEvent;
   #workouts = [];
+  #curWorkout;
+  markers = [];
   constructor() {
     this._getPosition();
     //local Storage
     this._getLocalStorage();
     // EventHandlers
     form.addEventListener('submit', this._newWorkout.bind(this));
+    // formEdit.addEventListener('submit', this._editWorkout.bind(this));
     // при изминении option в элементе select отображать разные элементы
     inputType.addEventListener('change', this._toggleElevationField);
     // центрирование карты пo клику по элементам workout в листе
     containerWorkouts.addEventListener('click', this._moveToPopup.bind(this));
+    // измененить элемент по клику на элемент workout в листе
+    containerWorkouts.addEventListener(
+      'dblclick',
+      this._deleteWorkout.bind(this)
+    );
+    containerWorkouts.addEventListener(
+      'contextmenu',
+      this._showFormEdit.bind(this)
+    );
   }
   _getPosition() {
     // проверка на старые браузеры
@@ -111,10 +123,28 @@ class App {
       this._renderWorkoutMarker(work);
     });
   }
-  _showForm(mapE) {
+  _showForm(mapE, editWorkout) {
+    // чистим инпуты
+    inputCadence.value =
+      inputDistance.value =
+      inputDuration.value =
+      inputElevation.value =
+        '';
     this.#mapEvent = mapE;
+    this.#curWorkout = editWorkout ? editWorkout : null;
     form.classList.remove('hidden'); // показываем форму при клике на карту
     inputDistance.focus(); // фокусируемся на нужном инпуте}
+    //  если изменять текущий workout, а не создавать новый
+    if (editWorkout) {
+      if (inputType.value != editWorkout.type) this._toggleElevationField();
+      inputType.value = editWorkout.type;
+      inputDuration.value = editWorkout.duration;
+      inputDistance.value = editWorkout.distance;
+      if (editWorkout.type === 'running')
+        inputCadence.value = editWorkout.cadence;
+      if (editWorkout.type === 'cycling')
+        inputElevation.value = editWorkout.elevetionGain;
+    }
   }
   _hideForm() {
     form.style.display = 'none';
@@ -142,7 +172,11 @@ class App {
     const type = inputType.value;
     const distance = +inputDistance.value;
     const duration = +inputDuration.value;
-    const { lat, lng } = this.#mapEvent.latlng;
+
+    let lat, lng;
+    this.#mapEvent
+      ? ({ lat, lng } = this.#mapEvent.latlng) // если новый
+      : ([lat, lng] = this.#curWorkout.coords); // если изменять текущий
     let workout;
 
     // если тренировка бег - создать обьект running
@@ -150,9 +184,6 @@ class App {
       const cadence = +inputCadence.value;
       // валидировать информацию
       if (
-        // !Number.isFinite(cadence) ||
-        // !Number.isFinite(distance) ||
-        // !Number.isFinite(duration)
         !validInputs(distance, duration, cadence) ||
         !allPositive(distance, duration, cadence)
       )
@@ -177,14 +208,31 @@ class App {
     // отобразить новую тренировку на карте как маркер
     this._renderWorkoutMarker(workout);
 
+    // если это изменение текущего workout, то удалить текущий воркаут из списка и массива
+    if (this.#curWorkout) {
+      let currEl = containerWorkouts.querySelector(
+        `[data-id="${this.#curWorkout.id}"]`
+      );
+
+      currEl.style.display = 'none';
+      currEl.classList.add('hidden');
+
+      this.#workouts.forEach((workout, index, arr) => {
+        if (workout.id === this.#curWorkout.id) {
+          arr.splice(index, 1);
+        }
+        this._setLocalStorage();
+      });
+    }
     // отобразить новую тренировку в списке
     this._renderWorkout(workout);
 
     // настроить local storage всем workout-ам
     this._setLocalStorage();
   }
+
   _renderWorkoutMarker(workout) {
-    L.marker(workout.coords)
+    let marker = L.marker(workout.coords)
       .addTo(this.#map)
       .bindPopup(
         L.popup({
@@ -198,7 +246,9 @@ class App {
       .setPopupContent(
         `${workout.type === 'running' ? '🏃‍♂️' : '🚴‍♀️'} ${workout.description}`
       )
-      .openPopup();
+      .openPopup()
+      .setZIndexOffset(workout.id);
+    this.markers.push(marker);
   }
   _renderWorkout(workout) {
     let html = `
@@ -247,7 +297,12 @@ class App {
       </li>
       `;
     }
-    form.insertAdjacentHTML('afterend', html);
+    if (this.#curWorkout) {
+      let curEl = document.querySelector(`[data-id="${this.#curWorkout.id}"]`);
+      curEl.insertAdjacentHTML('afterend', html);
+    } else {
+      form.insertAdjacentHTML('afterend', html);
+    }
     // Спрятать форму и очистить поля инпута:
     this._hideForm();
   }
@@ -258,7 +313,6 @@ class App {
     const workout = this.#workouts.find(
       work => work.id === workoutEl.dataset.id
     );
-    // console.log(workout);
     // присваиваем новые координаты нашей карте
     this.#map.setView(workout.coords, this.#mapZoomLevel, {
       animate: true,
@@ -280,6 +334,44 @@ class App {
       this._renderWorkout(work);
     });
   }
+  _showFormEdit(e) {
+    e.preventDefault();
+    let currentWorkout = this.#workouts.find(
+      workout => workout.id === e.target.closest('.workout').dataset.id
+    );
+
+    this._showForm(null, currentWorkout);
+  }
+  _deleteWorkout(e) {
+    // удаляем все workout элементы при ctrl+dblclick
+    if (e.ctrlKey) {
+      this.markers.forEach(marker => {
+        this.#map.removeLayer(marker);
+      });
+      Array.from(e.target.closest('.workouts').children).forEach(
+        (element, i) => {
+          if (i !== 0) element.style.display = 'none';
+        }
+      );
+      this.#workouts = [];
+      localStorage.removeItem('workouts'); // удаляем всё из локал сторадж
+    }
+
+    // удаляем один workout по которому кликнули два раза
+    let dblClickedCurrentWorkout = e.target.closest('.workout');
+    this.markers.forEach(marker => {
+      if (marker.options.zIndexOffset == dblClickedCurrentWorkout.dataset.id)
+        this.#map.removeLayer(marker);
+    });
+    dblClickedCurrentWorkout.style.display = 'none';
+    this.#workouts.forEach((workout, index, arr) => {
+      if (workout.id === dblClickedCurrentWorkout.dataset.id) {
+        arr.splice(index, 1);
+      }
+      this._setLocalStorage();
+    });
+  }
+
   remove() {
     localStorage.removeItem('workouts'); // удаляем всё из локал сторадж
     location.reload(); // перезагружает страницу в браузере
